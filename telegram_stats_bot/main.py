@@ -210,6 +210,11 @@ if __name__ == '__main__':
     chat_id_handler = CommandHandler('chatid', get_chatid, filters=~Filters.update.edited_message)
     dispatcher.add_handler(chat_id_handler)
 
+    try:
+        conf.CHAT_ID = int(conf.CHAT_ID)
+    except ValueError:
+        logger.error("CHAT_ID must be integer")
+
     if conf.CHAT_ID != 0:
         log_handler = MessageHandler(Filters.chat(chat_id=conf.CHAT_ID), log_message)
         dispatcher.add_handler(log_handler)
