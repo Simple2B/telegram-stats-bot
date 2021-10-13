@@ -54,174 +54,176 @@ sticker_idx = None
 sticker_id = None
 
 
-def log_message(update: Update, context: CallbackContext):
-    if update.edited_message:
-        edited_message, user = parse_message(update.effective_message)
-        bak_store.append_data('edited-messages', edited_message)
-        store.update_data('messages', edited_message)
-        return
+class StatsBot:
+    def __init__(self):
+        self.updater = Updater(token=conf.BOT_TOKEN, use_context=True)
+        self.dispatcher = self.updater.dispatcher
 
-    try:
-        logger.info(update.effective_message.message_id)
-    except AttributeError:
-        logger.warning("No effective_message attribute")
-    message, user = parse_message(update.effective_message)
+        path = conf.JSON_PATH
+        if not os.path.split(path)[0]:  # Empty string for left part of path
+            path = os.path.join(appdirs.user_data_dir('telegram-stats-bot'), path)
+        os.makedirs(path, exist_ok=True)
 
-    if message:
-        bak_store.append_data('messages', message)
-        store.append_data('messages', message)
-    if len(user) > 0:
-        for i in user:
-            if i:
-                bak_store.append_data('user_events', i)
-                store.append_data('user_events', i)
+        self.bak_store = JSONStore(path)
+        self.store = PostgresStore(conf.POSTGRES_URL)
+        self.stats = StatsRunner(self.store.engine, tz=conf.TZ)
+
+        # Handlers
+        stats_handler = CommandHandler('stats', self.print_stats, filters=~Filters.update.edited_message, run_async=True)
+        self.dispatcher.add_handler(stats_handler)
+
+        chat_id_handler = CommandHandler('chatid', self.get_chatid, filters=~Filters.update.edited_message)
+        self.dispatcher.add_handler(chat_id_handler)
+
+        if conf.CHAT_ID != 0:
+            log_handler = MessageHandler(Filters.chat(chat_id=conf.CHAT_ID), self.log_message)
+            self.dispatcher.add_handler(log_handler)
 
 
-def get_chatid(update: Update, context: CallbackContext):
-    context.bot.send_message(chat_id=update.effective_chat.id,
+    def log_message(self, update: Update, context: CallbackContext):
+        if update.edited_message:
+            edited_message, user = parse_message(update.effective_message)
+            self.bak_store.append_data('edited-messages', edited_message)
+            self.store.update_data('messages', edited_message)
+            return
+
+        try:
+            logger.info(update.effective_message.message_id)
+        except AttributeError:
+            logger.warning("No effective_message attribute")
+        message, user = parse_message(update.effective_message)
+
+        if message:
+            self.bak_store.append_data('messages', message)
+            self.store.append_data('messages', message)
+        if len(user) > 0:
+            for i in user:
+                if i:
+                    self.bak_store.append_data('user_events', i)
+                    self.store.append_data('user_events', i)
+
+    def get_chatid(self, update: Update, context: CallbackContext):
+        context.bot.send_message(chat_id=update.effective_chat.id,
                              text=f"Chat id: {update.effective_chat.id}")
 
 
-def test_can_read_all_group_messages(context: CallbackContext):
-    if not context.bot.can_read_all_group_messages:
-        logger.error("Bot privacy is set to enabled, cannot log messages!!!")
+    def test_can_read_all_group_messages(self, context: CallbackContext):
+        if not context.bot.can_read_all_group_messages:
+            logger.error("Bot privacy is set to enabled, cannot log messages!!!")
 
 
-def update_usernames_wrapper(context: CallbackContext):
-    context.dispatcher.run_async(update_usernames, context)
+    def update_usernames_wrapper(self, context: CallbackContext):
+        context.dispatcher.run_async(self.update_usernames, context)
 
+    def update_usernames(self, context: CallbackContext):  # context.job.context contains the chat_id
+        user_ids = self.stats.get_message_user_ids()
+        db_users = self.stats.get_db_users()
+        tg_users = {user_id: None for user_id in user_ids}
+        to_update = {}
+        for u_id in tg_users:
+            try:
+                user = context.bot.get_chat_member(chat_id=context.job.context, user_id=u_id).user
+                tg_users[u_id] = user.name, user.full_name
+                if tg_users[u_id] != db_users[u_id]:
+                    if tg_users[u_id][1] == db_users[u_id][1]:  # Flag these so we don't insert new row
+                        to_update[u_id] = tg_users[u_id][0], None
+                    else:
+                        to_update[u_id] = tg_users[u_id]
+            except KeyError:  # First time user
+                to_update[u_id] = tg_users[u_id]
+            except BadRequest:  # Handle users no longer in chat or haven't messaged since bot joined
+                logger.debug("Couldn't get user %s", u_id)  # debug level because will spam every hour
+        self.stats.update_user_ids(to_update)
+        if self.stats.users_lock.acquire(timeout=10):
+            self.stats.users = self.stats.get_db_users()
+            self.stats.users_lock.release()
+        else:
+            logger.warning("Couldn't acquire username lock.")
+            return
+        logger.info("Usernames updated")
 
-def update_usernames(context: CallbackContext):  # context.job.context contains the chat_id
-    user_ids = stats.get_message_user_ids()
-    db_users = stats.get_db_users()
-    tg_users = {user_id: None for user_id in user_ids}
-    to_update = {}
-    for u_id in tg_users:
-        try:
-            user = context.bot.get_chat_member(chat_id=context.job.context, user_id=u_id).user
-            tg_users[u_id] = user.name, user.full_name
-            if tg_users[u_id] != db_users[u_id]:
-                if tg_users[u_id][1] == db_users[u_id][1]:  # Flag these so we don't insert new row
-                    to_update[u_id] = tg_users[u_id][0], None
-                else:
-                    to_update[u_id] = tg_users[u_id]
-        except KeyError:  # First time user
-            to_update[u_id] = tg_users[u_id]
-        except BadRequest:  # Handle users no longer in chat or haven't messaged since bot joined
-            logger.debug("Couldn't get user %s", u_id)  # debug level because will spam every hour
-    stats.update_user_ids(to_update)
-    if stats.users_lock.acquire(timeout=10):
-        stats.users = stats.get_db_users()
-        stats.users_lock.release()
-    else:
-        logger.warning("Couldn't acquire username lock.")
-        return
-    logger.info("Usernames updated")
-
-
-def print_stats(update: Update, context: CallbackContext):
-    if update.effective_user.id not in stats.users:
-        return
-
-    stats_parser = get_parser(stats)
-    image = None
-
-    try:
-        ns = stats_parser.parse_args(shlex.split(" ".join(context.args)))
-    except HelpException as e:
-        text = e.msg
-        send_help(text, context, update)
-        return
-    except argparse.ArgumentError as e:
-        text = str(e)
-        send_help(text, context, update)
-        return
-    else:
-        args = vars(ns)
-        func = args.pop('func')
-
-        try:
-            if args['user']:
-                try:
-                    uid = args['user']
-                    args['user'] = uid, stats.users[uid][0]
-                except KeyError:
-                    send_help("unknown userid", context, update)
-                    return
-        except KeyError:
-            pass
-
-        try:
-            if args['me'] and not args['user']:  # Lets auto-user work by ignoring auto-input me arg
-                args['user'] = update.effective_user.id, update.effective_user.name
-            del args['me']
-        except KeyError:
-            pass
-
-        try:
-            text, image = func(**args)
-        except HelpException as e:
-            text = e.msg
-            send_help(text, context, update)
+    def print_stats(self, update: Update, context: CallbackContext):
+        if update.effective_user.id not in self.stats.users:
             return
 
-    if text:
-        context.bot.send_message(chat_id=update.effective_chat.id,
-                                 text=text,
-                                 parse_mode=telegram.ParseMode.MARKDOWN_V2)
-    if image:
-        context.bot.send_photo(chat_id=update.effective_chat.id, photo=image)
+        stats_parser = get_parser(self.stats)
+        image = None
 
+        try:
+            ns = stats_parser.parse_args(shlex.split(" ".join(context.args)))
+        except HelpException as e:
+            text = e.msg
+            self.send_help(text, context, update)
+            return
+        except argparse.ArgumentError as e:
+            text = str(e)
+            self.send_help(text, context, update)
+            return
+        else:
+            args = vars(ns)
+            func = args.pop('func')
 
-def send_help(text: str, context: CallbackContext, update: Update):
-    """
-    Send help text to user. Tries to send a direct message if possible.
-    :param text: text to send
-    :param context:
-    :param update:
-    :return:
-    """
-    try:
-        context.bot.send_message(chat_id=update.effective_user.id,
-                                 text=f"```\n{text}\n```",
-                                 parse_mode=telegram.ParseMode.MARKDOWN_V2)
-    except telegram.error.Unauthorized:  # If user has never chatted with bot
-        context.bot.send_message(chat_id=update.effective_chat.id,
-                                 text=f"```\n{text}\n```",
-                                 parse_mode=telegram.ParseMode.MARKDOWN_V2)
+            try:
+                if args['user']:
+                    try:
+                        uid = args['user']
+                        args['user'] = uid, self.stats.users[uid][0]
+                    except KeyError:
+                        self.send_help("unknown userid", context, update)
+                        return
+            except KeyError:
+                pass
+
+            try:
+                if args['me'] and not args['user']:  # Lets auto-user work by ignoring auto-input me arg
+                    args['user'] = update.effective_user.id, update.effective_user.name
+                del args['me']
+            except KeyError:
+                pass
+
+            try:
+                text, image = func(**args)
+            except HelpException as e:
+                text = e.msg
+                self.send_help(text, context, update)
+                return
+
+        if text:
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                    text=text,
+                                    parse_mode=telegram.ParseMode.MARKDOWN_V2)
+        if image:
+            context.bot.send_photo(chat_id=update.effective_chat.id, photo=image)
+
+    def send_help(text: str, context: CallbackContext, update: Update):
+        """
+        Send help text to user. Tries to send a direct message if possible.
+        :param text: text to send
+        :param context:
+        :param update:
+        :return:
+        """
+        try:
+            context.bot.send_message(chat_id=update.effective_user.id,
+                                    text=f"```\n{text}\n```",
+                                    parse_mode=telegram.ParseMode.MARKDOWN_V2)
+        except telegram.error.Unauthorized:  # If user has never chatted with bot
+            context.bot.send_message(chat_id=update.effective_chat.id,
+                                    text=f"```\n{text}\n```",
+                                    parse_mode=telegram.ParseMode.MARKDOWN_V2)
+
+    def start_bot(self):
+        # TODO review code possition
+        job_queue: JobQueue = self.updater.job_queue
+        update_users_job = job_queue.run_repeating(self.update_usernames_wrapper, interval=3600, first=5, context=conf.CHAT_ID)
+        test_privacy_job = job_queue.run_once(self.test_can_read_all_group_messages, 0)
+        # ---
+
+        self.updater.start_polling()
+        self.updater.idle()
 
 
 if __name__ == '__main__':
-    updater = Updater(token=conf.BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    bot = StatsBot()
 
-    path = conf.JSON_PATH
-    if not os.path.split(path)[0]:  # Empty string for left part of path
-        path = os.path.join(appdirs.user_data_dir('telegram-stats-bot'), path)
-
-    os.makedirs(path, exist_ok=True)
-    bak_store = JSONStore(path)
-    store = PostgresStore(conf.POSTGRES_URL)
-    stats = StatsRunner(store.engine, tz=conf.TZ)
-
-    stats_handler = CommandHandler('stats', print_stats, filters=~Filters.update.edited_message, run_async=True)
-    dispatcher.add_handler(stats_handler)
-
-    chat_id_handler = CommandHandler('chatid', get_chatid, filters=~Filters.update.edited_message)
-    dispatcher.add_handler(chat_id_handler)
-
-    try:
-        conf.CHAT_ID = int(conf.CHAT_ID)
-    except ValueError:
-        logger.error("CHAT_ID must be integer")
-
-    if conf.CHAT_ID != 0:
-        log_handler = MessageHandler(Filters.chat(chat_id=conf.CHAT_ID), log_message)
-        dispatcher.add_handler(log_handler)
-
-    job_queue: JobQueue = updater.job_queue
-    update_users_job = job_queue.run_repeating(update_usernames_wrapper, interval=3600, first=5, context=conf.CHAT_ID)
-    test_privacy_job = job_queue.run_once(test_can_read_all_group_messages, 0)
-
-    updater.start_polling()
-    updater.idle()
+    bot.start_bot()
