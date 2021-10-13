@@ -54,23 +54,23 @@ def init_dbs(engine: Engine):
             file_id                 text,
             type                    text
         );
-        
+
         alter table messages_utc
                 add column if not exists text_index_col tsvector
                 generated always as (to_tsvector('english', coalesce(text, ''))) stored;
-        
+
         create index if not exists text_idx
             on messages_utc using gin (text_index_col);
-        
+
         create index if not exists messages_utc_date_index
             on messages_utc (date);
-        
+
         create index if not exists messages_utc_from_user_index
             on messages_utc (from_user);
-        
+
         create index if not exists messages_utc_type_index
             on messages_utc (type);
-            
+
         create table if not exists user_events
         (
             message_id bigint,
@@ -78,10 +78,10 @@ def init_dbs(engine: Engine):
             date       timestamp with time zone,
             event      text
         );
-        
+
         create index if not exists ix_user_events_message_id
             on user_events (message_id);
-        
+
         create table if not exists user_names
         (
             user_id  bigint,
@@ -89,10 +89,10 @@ def init_dbs(engine: Engine):
             username text,
             display_name text
         );
-        
+
         create index if not exists user_names_user_id_date_index
             on user_names (user_id, date);
-        
+
         """
 
     with engine.connect() as con:

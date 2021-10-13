@@ -35,7 +35,7 @@ import appdirs
 from .parse import parse_message
 from .log_storage import JSONStore, PostgresStore
 from .stats import StatsRunner, get_parser, HelpException
-
+from config import BaseConfig as conf
 
 warnings.filterwarnings("ignore")
 
@@ -192,29 +192,17 @@ def send_help(text: str, context: CallbackContext, update: Update):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('token', type=str, help="Telegram bot token")
-    parser.add_argument('chat_id', type=int, help="Telegram chat id to monitor.")
-    parser.add_argument('postgres_url', type=str, help="Sqlalchemy-compatible postgresql url.")
-    parser.add_argument('--json-path', type=str,
-                        help="Either full path to backup storage folder or prefix (will be stored in app data dir.",
-                        default="chat")
-    parser.add_argument('--tz', type=str,
-                        help="tz database time zone string, e.g. Europe/London",
-                        default='Etc/UTC')
-    args = parser.parse_args()
-
-    updater = Updater(token=args.token, use_context=True)
+    updater = Updater(token=conf.BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
 
-    path = args.json_path
+    path = conf.JSON_PATH
     if not os.path.split(path)[0]:  # Empty string for left part of path
         path = os.path.join(appdirs.user_data_dir('telegram-stats-bot'), path)
 
     os.makedirs(path, exist_ok=True)
     bak_store = JSONStore(path)
-    store = PostgresStore(args.postgres_url)
-    stats = StatsRunner(store.engine, tz=args.tz)
+    store = PostgresStore(conf.POSTGRES_URL)
+    stats = StatsRunner(store.engine, tz=conf.TZ)
 
     stats_handler = CommandHandler('stats', print_stats, filters=~Filters.update.edited_message, run_async=True)
     dispatcher.add_handler(stats_handler)
@@ -222,12 +210,12 @@ if __name__ == '__main__':
     chat_id_handler = CommandHandler('chatid', get_chatid, filters=~Filters.update.edited_message)
     dispatcher.add_handler(chat_id_handler)
 
-    if args.chat_id != 0:
-        log_handler = MessageHandler(Filters.chat(chat_id=args.chat_id), log_message)
+    if conf.CHAT_ID != 0:
+        log_handler = MessageHandler(Filters.chat(chat_id=conf.CHAT_ID), log_message)
         dispatcher.add_handler(log_handler)
 
     job_queue: JobQueue = updater.job_queue
-    update_users_job = job_queue.run_repeating(update_usernames_wrapper, interval=3600, first=5, context=args.chat_id)
+    update_users_job = job_queue.run_repeating(update_usernames_wrapper, interval=3600, first=5, context=conf.CHAT_ID)
     test_privacy_job = job_queue.run_once(test_can_read_all_group_messages, 0)
 
     updater.start_polling()
